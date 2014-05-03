@@ -1,0 +1,1 @@
+CREATE DATABASE spogdb WITH OWNER = spoguser;

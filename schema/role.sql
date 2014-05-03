@@ -1,0 +1,1 @@
+CREATE USER spoguser WITH PASSWORD 'imateapot';
