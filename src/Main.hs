@@ -7,7 +7,7 @@
 import Database.PostgreSQL.Simple
 import Database.PostgreSQL.Simple.FromRow
 import Control.Applicative
-import Control.Exception (bracket, IOException)
+import Control.Exception (bracket)
 import Data.Int
 import Data.Maybe(fromJust)
 import Data.Map (Map)
@@ -22,6 +22,8 @@ import Database.PostgreSQL.Simple.TypeInfo.Static (typoid, int8)
 import qualified Data.ByteString.Char8 as B
 import Data.Typeable()
 import Data.Data
+
+-- domain data
 
 data User = User { userId :: UserId, userName :: String }
    deriving (Show)
@@ -116,13 +118,6 @@ createMessage connection sender recipients content = withTransaction connection 
    testAffected ("message recipients") (length recipients) $ executeMany connection "INSERT INTO recipients VALUES (?, ?)" $ fmap (i,) recipients
    return i
 
-{-
-Some suboptimal choices, here.
-1. Join messages to recipients. This gets us the answer in a single query but duplicates the message content for every recipient.
-2. Select from messages and use that to form an in list to use on the recipients table. This requires two queries but less bandwidth.
-3. Iterate the messages and query the recipients for each.  This is listed only for completeness and to note that it would fit better over the native data types
-in that we wouldn't need intermediate types like MessageT to hold partial results.
--}
 getSentMessages :: Connection -> UserId -> IO [Message]
 getSentMessages connection sender = withTransaction connection $ do
    -- messages in "table" format (i.e. no dependent data like recipients)
@@ -133,8 +128,8 @@ getReceivedMessages connection receiver = withTransaction connection $ do
    mids :: [Int64] <- query connection "SELECT message_id FROM recipients WHERE recipient_id = ?" $ Only $ _uid receiver
    (query connection "SELECT * FROM messages WHERE id in ?" $ Only $ In mids) >>= getMessages connection
 
--- takes records from the messages table and turns them into hierarchical message records (i.e. with recipients).
--- this function does not initiate a transaction.
+-- Takes records from the messages table and turns them into hierarchical message records (i.e. with recipients) in a single query.
+-- This function does not initiate a transaction; it is an auxiliary to other functions.
 getMessages :: Connection -> [MessageT] -> IO [Message]
 getMessages connection mts = do
    -- all the recipients for all the message table records.
@@ -144,13 +139,13 @@ getMessages connection mts = do
    return $ fmap (makeMessage m2rs) mts
    where
    combineRecipients :: Map MessageId [UserId] -> MessageRecipient -> Map MessageId [UserId]
-   -- nb flip ++ here so that the singleton r get prepended to the list (for efficiency).
+   -- nb flip ++ here so that the singleton r gets prepended to the list (for efficiency).
    combineRecipients mm (MessageRecipient m r) = Map.insertWith (flip (++)) m [r] mm
    makeMessage :: Map MessageId [UserId] -> MessageT -> Message
    makeMessage m2rs mt = let mid = messageIdT mt in
       Message mid (messageSenderT mt) (Map.findWithDefault [] mid m2rs) (messageContentT mt)
 
--- wipes the database clean
+-- Wipes the database clean.
 wipeOut :: Connection -> IO ()
 wipeOut connection = withTransaction connection $ do
    r <- execute_ connection "DELETE FROM recipients"
@@ -158,6 +153,7 @@ wipeOut connection = withTransaction connection $ do
    u <- execute_ connection "DELETE FROM users"
    putStrLn $ concat ["-- wipeout\n  recipients: ", show r, "\n    messages: ", show m, "\n       users: ", show u]
 
+-- Brackets a connection.
 withConnection :: ConnectInfo -> (Connection -> IO a) -> IO a
 withConnection connectInfo f = bracket (connect connectInfo) close f
 
@@ -166,6 +162,7 @@ showAllUsers connection = do
    us :: [User] <- query_ connection "SELECT * FROM users"
    printList "all users" us
 
+-- Prints a list of stuff with a header and an index in front of each item.
 printList :: (Show a) => String -> [a] -> IO ()
 printList header list = do
    putStrLn $ concat ["-- ", header, " [", show $ length list, "]"]
@@ -174,6 +171,7 @@ printList header list = do
    printItem :: (Show a) => (Int, a) -> IO ()
    printItem (n, i) = putStrLn $ concat ["  ", show n, ". ", show i]
 
+-- Do a bunch of stuff and inspect the results.
 main :: IO ()
 main = do
    let connectInfo = ConnectInfo "localhost" 5432 "spoguser" "imateapot" "spogdb"
@@ -186,13 +184,13 @@ main = do
       users@[bob, carol, ted, alice] <- fmap (fmap fromJust) $ sequence $ fmap (getUserByName connection) userNames
       showAllUsers connection
       printList "by name" users
-      -- printList "by id" $ (fmap (fmap fromJust) $ sequence $ fmap (getUserById connection) ids)
       (fmap (fmap fromJust) $ sequence $ fmap (getUserById connection) ids) >>= printList "by id"
 
+      -- These get Nothing.
       getUserById connection (UserId (-42)) >>= putStrLn . show
       getUserByName connection "nobody" >>= putStrLn . show
 
-      -- makes messages whose contents indicate the sender and receiver(s) for easy visual inspection.
+      -- Makes messages whose contents indicate the sender and receiver(s) for easy visual inspection.
       let makeMessage s rs = createMessage connection (userId s) (fmap userId rs) $ concat $ [userName s, " -> ", show $ fmap userName rs]
 
       makeMessage ted [bob]
