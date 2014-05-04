@@ -12,25 +12,69 @@ import Data.Int
 import Data.Map (Map)
 import qualified Data.Map as Map
 
-data User = User { userId :: Int64, userName :: String }
+-- stuff for Field marshaling
+import Database.PostgreSQL.Simple.FromField
+      ( FromField (fromField) , typeOid, returnError, ResultError (..) )
+import Database.PostgreSQL.Simple.ToField 
+      (ToField (toField))
+import Database.PostgreSQL.Simple.TypeInfo.Static (typoid, int8)
+import qualified Data.ByteString.Char8 as B
+import Data.Typeable()
+import Data.Data
+
+data User = User { userId :: UserId, userName :: String }
    deriving (Show)
+
+newtype UserId = UserId { _uid :: Int64 }
+  deriving (Eq, Ord, Show, Typeable)
+
+instance FromField UserId where
+   fromField f mdata = 
+      if typeOid f /= typoid int8
+        then returnError Incompatible f ""
+        else case B.unpack `fmap` mdata of
+            Nothing  -> returnError UnexpectedNull f ""
+            Just dat -> return $ UserId $ read dat
+
+instance ToField UserId where
+   toField (UserId i) = toField i
 
 -- This maps directly onto the messages table and is used for storing intermediate results.
-data MessageT = MessageT { messageIdT :: Int64, messageSenderT :: Int64, messageContentT :: String }
+data MessageT = MessageT { messageIdT :: MessageId, messageSenderT :: UserId, messageContentT :: String }
    deriving (Show)
 
-data Message = Message { messageId :: Int64, messageSender :: Int64, messageRecipients :: [Int64], messageContent :: String }
+data Message = Message { messageId :: MessageId, messageSender :: UserId, messageRecipients :: [UserId], messageContent :: String }
    deriving (Show)
+
+newtype MessageId = MessageId { _mid :: Int64 }
+  deriving (Eq, Ord, Show, Typeable)
+
+instance FromField MessageId where
+   fromField f mdata = 
+      if typeOid f /= typoid int8
+        then returnError Incompatible f ""
+        else case B.unpack `fmap` mdata of
+            Nothing  -> returnError UnexpectedNull f ""
+            Just dat -> return $ MessageId $ read dat
+
+instance ToField MessageId where
+   toField (MessageId i) = toField i
 
 -- This guy lets us get currval after inserting a record.
 instance FromRow Int64 where
    fromRow = field
 
-data Int64_2 = Int64_2 Int64 Int64
+instance FromRow MessageId where
+   fromRow = field
 
--- 2-tuples of int64, e.g. from recipients table.
-instance FromRow Int64_2 where
-   fromRow = Int64_2 <$> field <*> field
+instance FromRow UserId where
+   fromRow = field
+
+-- Rows from the recipients table.
+data MessageRecipient = MessageRecipient MessageId UserId
+
+instance FromRow MessageRecipient where
+   fromRow = MessageRecipient <$> field <*> field
 
 instance FromRow User where
   fromRow = User <$> field <*> field
@@ -49,7 +93,7 @@ testAffected :: Integral a => String -> a -> IO Int64 -> IO ()
 testAffected msg expected action = action >>= \ actual -> if (fromIntegral expected /= actual) then fail msg else return ()
 
 -- creates message and returns the new id.
-createMessage :: Connection -> Int64 -> [Int64] -> String -> IO Int64
+createMessage :: Connection -> UserId -> [UserId] -> String -> IO MessageId
 createMessage connection sender recipients content = withTransaction connection $ do
    testAffected ("Cannot createMessage" ++ content) (1 :: Int) $ execute connection "INSERT INTO messages (sender, content) VALUES (?, ?)" (sender, content)
    i <- query_ connection "SELECT currval(pg_get_serial_sequence('messages', 'id'))" >>= return . head
@@ -57,12 +101,12 @@ createMessage connection sender recipients content = withTransaction connection 
    return i
 
 -- inserts user and returns the new id.
-createUser :: Connection -> String -> IO Int64
+createUser :: Connection -> String -> IO UserId
 createUser connection name = withTransaction connection $ do
    testAffected ("Cannot createUser: " ++ name) (1 :: Int) $ execute connection "INSERT INTO users (name) VALUES (?)" [name]
    i  <- query_ connection "SELECT currval(pg_get_serial_sequence('users', 'id'))" >>= return . head
    putStrLn $ "id of " ++ name ++ ": " ++ show i
-   return i
+   return $ UserId i
 
 {-
 Some suboptimal choices, here.
@@ -71,14 +115,14 @@ Some suboptimal choices, here.
 3. Iterate the messages and query the recipients for each.  This is listed only for completeness and to note that it would fit better over the native data types
 in that we wouldn't need intermediate types like MessageT to hold partial results.
 -}
-getSentMessages :: Connection -> Int64 -> IO [Message]
+getSentMessages :: Connection -> UserId -> IO [Message]
 getSentMessages connection sender = withTransaction connection $ do
    -- messages in "table" format (i.e. no dependent data like recipients)
-   query connection "SELECT * FROM messages WHERE sender = ?" [sender] >>= getMessages connection
+   query connection "SELECT * FROM messages WHERE sender = ?" [_uid sender] >>= getMessages connection
 
-getReceivedMessages :: Connection -> Int64 -> IO [Message]
+getReceivedMessages :: Connection -> UserId -> IO [Message]
 getReceivedMessages connection receiver = withTransaction connection $ do
-   mids :: [Int64] <- query connection "SELECT message_id FROM recipients WHERE recipient_id = ?" $ Only receiver
+   mids :: [Int64] <- query connection "SELECT message_id FROM recipients WHERE recipient_id = ?" $ Only $ _uid receiver
    (query connection "SELECT * FROM messages WHERE id in ?" $ Only $ In mids) >>= getMessages connection
 
 -- takes records from the messages table and turns them into hierarchical message records (i.e. with recipients).
@@ -86,14 +130,14 @@ getReceivedMessages connection receiver = withTransaction connection $ do
 getMessages :: Connection -> [MessageT] -> IO [Message]
 getMessages connection mts = do
    -- all the recipients for all the message table records.
-   ars :: [Int64_2] <- query connection "SELECT * FROM recipients WHERE message_id in ?" $ Only $ In $ fmap messageIdT mts
+   ars :: [MessageRecipient] <- query connection "SELECT * FROM recipients WHERE message_id in ?" $ Only $ In $ fmap messageIdT mts
    -- map all the recipients under each message
    let m2rs = (foldl combineRecipients Map.empty ars)
    return $ fmap (makeMessage m2rs) mts
    where
-   combineRecipients :: Map Int64 [Int64] -> Int64_2 -> Map Int64 [Int64]
+   combineRecipients :: Map MessageId [UserId] -> MessageRecipient -> Map MessageId [UserId]
    -- nb flip ++ here so that the singleton r get prepended to the list (for efficiency).
-   combineRecipients mm (Int64_2 m r) = Map.insertWith (flip (++)) m [r] mm
+   combineRecipients mm (MessageRecipient m r) = Map.insertWith (flip (++)) m [r] mm
    makeMessage m2rs mt = let mid = messageIdT mt in
       Message mid (messageSenderT mt) (Map.findWithDefault (error $ "no recipients for message " ++ show mid) mid m2rs) (messageContentT mt)
 
