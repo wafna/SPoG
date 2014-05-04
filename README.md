@@ -1,7 +1,7 @@
 SPoG
 ====
 
-A app demonstrating with postgresql-simple.
+A demonstration of Haskell's postgresql-simple.
 
 There's lots of stuff on the web about this but it's hard to get some simple, straightforward, and complete working code.  This ends now.
 
