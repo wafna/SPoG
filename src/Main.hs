@@ -7,13 +7,16 @@
 import Database.PostgreSQL.Simple
 import Database.PostgreSQL.Simple.FromRow
 import Control.Applicative
-import Control.Exception(bracket, IOException)
+import Control.Exception (bracket, IOException)
 import Data.Int
+import Data.Map (Map)
+import qualified Data.Map as Map
 
 data User = User { userId :: Int64, userName :: String }
    deriving (Show)
 
-data MessageT = MessageT Int64 Int64 String
+-- This maps directly onto the messages table and is used for storing intermediate results.
+data MessageT = MessageT { messageIdT :: Int64, messageSenderT :: Int64, messageContentT :: String }
    deriving (Show)
 
 data Message = Message { messageId :: Int64, messageSender :: Int64, messageRecipients :: [Int64], messageContent :: String }
@@ -22,6 +25,12 @@ data Message = Message { messageId :: Int64, messageSender :: Int64, messageReci
 -- This guy lets us get currval after inserting a record.
 instance FromRow Int64 where
    fromRow = field
+
+data Int64_2 = Int64_2 Int64 Int64
+
+-- 2-tuples of int64, e.g. from recipients table.
+instance FromRow Int64_2 where
+   fromRow = Int64_2 <$> field <*> field
 
 instance FromRow User where
   fromRow = User <$> field <*> field
@@ -35,10 +44,9 @@ showAllUsers connection = do
    putStrLn $ "-- all users [" ++ show (length us) ++ "]"
    sequence_ $ fmap (putStrLn . show) $ zip [(1 :: Int) ..] us
 
+-- insists that we affected the number of rows we think we should have.
 testAffected :: Integral a => String -> a -> IO Int64 -> IO ()
-testAffected msg expected action = do
-   actual <- action
-   if (fromIntegral expected /= actual) then fail msg else return ()
+testAffected msg expected action = action >>= \ actual -> if (fromIntegral expected /= actual) then fail msg else return ()
 
 -- creates message and returns the new id.
 createMessage :: Connection -> Int64 -> [Int64] -> String -> IO Int64
@@ -56,9 +64,28 @@ createUser connection name = withTransaction connection $ do
    putStrLn $ "id of " ++ name ++ ": " ++ show i
    return i
 
-getSentMessages :: Connection -> Int64 -> IO [MessageT]
+{-
+Some suboptimal choices, here.
+1. Join messages to recipients. This gets us the answer in a single query but duplicates the message content for every recipient.
+2. Select from messages and use that to form an in list to use on the recipients table. This requires two queries but less bandwidth.
+3. Iterate the messages and query the recipients for each.  This is listed only for completeness and to note that it would fit better over the native data types
+in that we wouldn't need intermediate types like MessageT to hold partial results.
+-}
+getSentMessages :: Connection -> Int64 -> IO [Message]
 getSentMessages connection sender = do
-   query connection "SELECT * FROM messages WHERE sender = ?" [sender]
+   -- messages in "table" format (i.e. no dependent data like recipients)
+   mts :: [MessageT] <- query connection "SELECT * FROM messages WHERE sender = ?" [sender]
+   -- all the recipients for all the messages selected, above.
+   ars :: [Int64_2] <- query connection "SELECT * FROM recipients WHERE message_id in ?" $ Only $ In $ fmap messageIdT mts
+   -- map all the recipients under each message
+   let m2rs = (foldl combineRecipients Map.empty ars)
+   return $ fmap (makeMessage m2rs) mts
+   where
+   combineRecipients :: Map Int64 [Int64] -> Int64_2 -> Map Int64 [Int64]
+   -- nb flip ++ here so that the singleton r get prepended to the list.
+   combineRecipients mm (Int64_2 m r) = Map.insertWith (flip (++)) m [r] mm
+   makeMessage m2rs mt = let mid = messageIdT mt in
+      Message mid (messageSenderT mt) (Map.findWithDefault (error $ "no recipients for message " ++ show mid) mid m2rs) (messageContentT mt)
 
 wipeOut :: Connection -> IO ()
 wipeOut connection = withTransaction connection $ do
@@ -77,13 +104,13 @@ main = do
       wipeOut connection
       -- putStrLn $ show $ postgreSQLConnectionString connectInfo
       showAllUsers connection
-      --testAffected "insert bob" 1 $ execute connection "INSERT INTO users (name) VALUES (?)" ["bob" :: String]
       bob <- createUser connection "bob"
       carol <- createUser connection "carol"
       ted <- createUser connection "ted"
       alice <- createUser connection "alice"
       showAllUsers connection
-      m1 <- createMessage connection bob [carol, ted] "bob -> (carol, ted)"
-      putStrLn $ concat ["message id: ", show m1]
+      createMessage connection bob [carol, ted] "bob -> (carol, ted)"
+      createMessage connection bob [alice] "bob -> (alice)"
+      createMessage connection alice [bob] "alice -> (bob)"
       ms <- getSentMessages connection bob
-      putStrLn $ show ms
+      sequence_ $ fmap (putStrLn . show) ms

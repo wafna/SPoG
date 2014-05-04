@@ -17,6 +17,7 @@ executable spog
                    bytestring >=0.9.1 && <0.11,
                    MonadCatchIO-transformers >=0.2.1 && <0.4, 
                    mtl >=2 && <3,
+                   containers >= 0.5.0.0,
                    postgresql-simple >= 0.4.2.1
      
     if impl(ghc >=6.12.0)
