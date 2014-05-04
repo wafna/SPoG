@@ -72,17 +72,27 @@ Some suboptimal choices, here.
 in that we wouldn't need intermediate types like MessageT to hold partial results.
 -}
 getSentMessages :: Connection -> Int64 -> IO [Message]
-getSentMessages connection sender = do
+getSentMessages connection sender = withTransaction connection $ do
    -- messages in "table" format (i.e. no dependent data like recipients)
-   mts :: [MessageT] <- query connection "SELECT * FROM messages WHERE sender = ?" [sender]
-   -- all the recipients for all the messages selected, above.
+   query connection "SELECT * FROM messages WHERE sender = ?" [sender] >>= getMessages connection
+
+getReceivedMessages :: Connection -> Int64 -> IO [Message]
+getReceivedMessages connection receiver = withTransaction connection $ do
+   mids :: [Int64] <- query connection "SELECT message_id FROM recipients WHERE recipient_id = ?" $ Only receiver
+   (query connection "SELECT * FROM messages WHERE id in ?" $ Only $ In mids) >>= getMessages connection
+
+-- takes records from the messages table and turns them into hierarchical message records (i.e. with recipients).
+-- this function does not initiate a transaction.
+getMessages :: Connection -> [MessageT] -> IO [Message]
+getMessages connection mts = do
+   -- all the recipients for all the message table records.
    ars :: [Int64_2] <- query connection "SELECT * FROM recipients WHERE message_id in ?" $ Only $ In $ fmap messageIdT mts
    -- map all the recipients under each message
    let m2rs = (foldl combineRecipients Map.empty ars)
    return $ fmap (makeMessage m2rs) mts
    where
    combineRecipients :: Map Int64 [Int64] -> Int64_2 -> Map Int64 [Int64]
-   -- nb flip ++ here so that the singleton r get prepended to the list.
+   -- nb flip ++ here so that the singleton r get prepended to the list (for efficiency).
    combineRecipients mm (Int64_2 m r) = Map.insertWith (flip (++)) m [r] mm
    makeMessage m2rs mt = let mid = messageIdT mt in
       Message mid (messageSenderT mt) (Map.findWithDefault (error $ "no recipients for message " ++ show mid) mid m2rs) (messageContentT mt)
@@ -109,8 +119,14 @@ main = do
       ted <- createUser connection "ted"
       alice <- createUser connection "alice"
       showAllUsers connection
-      createMessage connection bob [carol, ted] "bob -> (carol, ted)"
-      createMessage connection bob [alice] "bob -> (alice)"
-      createMessage connection alice [bob] "alice -> (bob)"
+      createMessage connection bob [carol, ted] "bob -> [carol, ted]"
+      createMessage connection bob [carol] "bob -> [carol]"
+      createMessage connection bob [alice] "bob -> [alice]"
+      createMessage connection alice [bob] "alice -> [bob]"
+      createMessage connection ted [carol] "ted -> [carol, alice]"
+      putStrLn "-- sent by bob"
       ms <- getSentMessages connection bob
+      sequence_ $ fmap (putStrLn . show) ms
+      putStrLn "-- received by carol"
+      ms <- getReceivedMessages connection carol
       sequence_ $ fmap (putStrLn . show) ms
