@@ -43,6 +43,7 @@ instance ToField UserId where
 data MessageT = MessageT { messageIdT :: MessageId, messageSenderT :: UserId, messageContentT :: String }
    deriving (Show)
 
+-- The hierarchical message type (has recipients).
 data Message = Message { messageId :: MessageId, messageSender :: UserId, messageRecipients :: [UserId], messageContent :: String }
    deriving (Show)
 
@@ -82,12 +83,6 @@ instance FromRow User where
 instance FromRow MessageT where
    fromRow = MessageT <$> field <*> field <*> field
 
-showAllUsers :: Connection -> IO ()
-showAllUsers connection = do
-   us :: [User] <- query_ connection "SELECT * FROM users"
-   putStrLn $ "-- all users [" ++ show (length us) ++ "]"
-   sequence_ $ fmap (putStrLn . show) $ zip [(1 :: Int) ..] us
-
 -- insists that we affected the number of rows we think we should have.
 testAffected :: Integral a => String -> a -> IO Int64 -> IO ()
 testAffected msg expected action = action >>= \ actual -> if (fromIntegral expected /= actual) then fail msg else return ()
@@ -101,6 +96,7 @@ createMessage connection sender recipients content = withTransaction connection 
    return i
 
 -- inserts user and returns the new id.
+-- transaction probably not necessary here since user has no dependent records and currval is contextualized to the session.
 createUser :: Connection -> String -> IO UserId
 createUser connection name = withTransaction connection $ do
    testAffected ("Cannot createUser: " ++ name) (1 :: Int) $ execute connection "INSERT INTO users (name) VALUES (?)" [name]
@@ -138,9 +134,11 @@ getMessages connection mts = do
    combineRecipients :: Map MessageId [UserId] -> MessageRecipient -> Map MessageId [UserId]
    -- nb flip ++ here so that the singleton r get prepended to the list (for efficiency).
    combineRecipients mm (MessageRecipient m r) = Map.insertWith (flip (++)) m [r] mm
+   makeMessage :: Map MessageId [UserId] -> MessageT -> Message
    makeMessage m2rs mt = let mid = messageIdT mt in
-      Message mid (messageSenderT mt) (Map.findWithDefault (error $ "no recipients for message " ++ show mid) mid m2rs) (messageContentT mt)
+      Message mid (messageSenderT mt) (Map.findWithDefault [] mid m2rs) (messageContentT mt)
 
+-- wipes the database clean
 wipeOut :: Connection -> IO ()
 wipeOut connection = withTransaction connection $ do
    r <- execute_ connection "DELETE FROM recipients"
@@ -150,6 +148,16 @@ wipeOut connection = withTransaction connection $ do
 
 withConnection :: ConnectInfo -> (Connection -> IO a) -> IO a
 withConnection connectInfo f = bracket (connect connectInfo) close f
+
+showAllUsers :: Connection -> IO ()
+showAllUsers connection = do
+   us :: [User] <- query_ connection "SELECT * FROM users"
+   printList "all users" us
+
+printList :: (Show a) => String -> [a] -> IO ()
+printList header list = do
+   putStrLn $ concat ["-- ", header, " [", show $ length list, "]"]
+   sequence_ $ fmap (putStrLn . show) $ zip [(1 :: Int) ..] list
 
 main :: IO ()
 main = do
@@ -168,9 +176,7 @@ main = do
       createMessage connection bob [alice] "bob -> [alice]"
       createMessage connection alice [bob] "alice -> [bob]"
       createMessage connection ted [carol] "ted -> [carol, alice]"
-      putStrLn "-- sent by bob"
       ms <- getSentMessages connection bob
-      sequence_ $ fmap (putStrLn . show) ms
-      putStrLn "-- received by carol"
+      printList "sent by bob" ms
       ms <- getReceivedMessages connection carol
-      sequence_ $ fmap (putStrLn . show) ms
+      printList "received by carol" ms
