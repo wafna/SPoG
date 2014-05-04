@@ -9,6 +9,7 @@ import Database.PostgreSQL.Simple.FromRow
 import Control.Applicative
 import Control.Exception (bracket, IOException)
 import Data.Int
+import Data.Maybe(fromJust)
 import Data.Map (Map)
 import qualified Data.Map as Map
 
@@ -93,7 +94,6 @@ createUser :: Connection -> String -> IO UserId
 createUser connection name = withTransaction connection $ do
    testAffected ("Cannot createUser: " ++ name) (1 :: Int) $ execute connection "INSERT INTO users (name) VALUES (?)" [name]
    i  <- query_ connection "SELECT currval(pg_get_serial_sequence('users', 'id'))" >>= return . head
-   putStrLn $ "id of " ++ name ++ ": " ++ show i
    return $ UserId i
 
 justOne :: IO [a] -> IO (Maybe a)
@@ -178,22 +178,33 @@ main :: IO ()
 main = do
    let connectInfo = ConnectInfo "localhost" 5432 "spoguser" "imateapot" "spogdb"
    withConnection connectInfo $ \ connection -> do
-      wipeOut connection
       -- putStrLn $ show $ postgreSQLConnectionString connectInfo
+      wipeOut connection
+
+      let userNames = ["bob", "carol", "ted", "alice"]
+      ids@[b, c, t, a] <- sequence $ fmap (createUser connection) userNames
+      users@[bob, carol, ted, alice] <- fmap (fmap fromJust) $ sequence $ fmap (getUserByName connection) userNames
       showAllUsers connection
-      bob <- createUser connection "bob"
-      carol <- createUser connection "carol"
-      ted <- createUser connection "ted"
-      alice <- createUser connection "alice"
-      showAllUsers connection
-      getUserById connection bob >>= putStrLn . show
-      getUserByName connection "bob" >>= putStrLn . show
-      createMessage connection bob [carol, ted] "bob -> [carol, ted]"
-      createMessage connection bob [carol] "bob -> [carol]"
-      createMessage connection bob [alice] "bob -> [alice]"
-      createMessage connection alice [bob] "alice -> [bob]"
-      createMessage connection ted [carol, alice] "ted -> [carol, alice]"
-      ms <- getSentMessages connection bob
-      printList "sent by bob" ms
-      ms <- getReceivedMessages connection carol
-      printList "received by carol" ms
+      printList "by name" users
+      -- printList "by id" $ (fmap (fmap fromJust) $ sequence $ fmap (getUserById connection) ids)
+      (fmap (fmap fromJust) $ sequence $ fmap (getUserById connection) ids) >>= printList "by id"
+
+      getUserById connection (UserId (-42)) >>= putStrLn . show
+      getUserByName connection "nobody" >>= putStrLn . show
+
+      -- makes messages whose contents indicate the sender and receiver(s) for easy visual inspection.
+      let makeMessage s rs = createMessage connection (userId s) (fmap userId rs) $ concat $ [userName s, " -> ", show $ fmap userName rs]
+
+      makeMessage ted [bob]
+      makeMessage bob [carol, ted]
+      makeMessage bob [carol]
+      makeMessage bob [alice]
+      makeMessage alice [bob]
+      makeMessage alice [alice, bob]
+      makeMessage ted [carol, alice]
+      makeMessage carol [bob, carol, ted, alice]
+
+      getSentMessages connection b >>= printList "sent by bob"
+      getSentMessages connection a >>= printList "sent by alice"
+      getReceivedMessages connection c >>= printList "received by carol"
+      getReceivedMessages connection t >>= printList "received by ted"
