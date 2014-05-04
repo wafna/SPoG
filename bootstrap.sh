@@ -2,6 +2,7 @@
 
 # provision script for ubuntu-14
 
+sudo apt-get -y update
 # take any security upgrades
 sudo apt-get -y dist-upgrade
 # needed later for postgresql-simple
