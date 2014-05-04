@@ -87,14 +87,6 @@ instance FromRow MessageT where
 testAffected :: Integral a => String -> a -> IO Int64 -> IO ()
 testAffected msg expected action = action >>= \ actual -> if (fromIntegral expected /= actual) then fail msg else return ()
 
--- creates message and returns the new id.
-createMessage :: Connection -> UserId -> [UserId] -> String -> IO MessageId
-createMessage connection sender recipients content = withTransaction connection $ do
-   testAffected ("Cannot createMessage" ++ content) (1 :: Int) $ execute connection "INSERT INTO messages (sender, content) VALUES (?, ?)" (sender, content)
-   i <- query_ connection "SELECT currval(pg_get_serial_sequence('messages', 'id'))" >>= return . head
-   testAffected ("message recipients") (length recipients) $ executeMany connection "INSERT INTO recipients VALUES (?, ?)" $ fmap (i,) recipients
-   return i
-
 -- inserts user and returns the new id.
 -- transaction probably not necessary here since user has no dependent records and currval is contextualized to the session.
 createUser :: Connection -> String -> IO UserId
@@ -103,6 +95,26 @@ createUser connection name = withTransaction connection $ do
    i  <- query_ connection "SELECT currval(pg_get_serial_sequence('users', 'id'))" >>= return . head
    putStrLn $ "id of " ++ name ++ ": " ++ show i
    return $ UserId i
+
+justOne :: IO [a] -> IO (Maybe a)
+justOne q = q >>= \ xs -> return $ case xs of
+   [] -> Nothing
+   x : [] -> Just x
+   _ -> error "Too many!"
+
+getUserById :: Connection -> UserId -> IO (Maybe User)
+getUserById connection uid = justOne $ query connection "SELECT * FROM users WHERE id = ?" $ Only uid
+
+getUserByName :: Connection -> String -> IO (Maybe User)
+getUserByName connection name = justOne $ query connection "SELECT * FROM users WHERE name = ?" $ Only name
+
+-- creates message and returns the new id.
+createMessage :: Connection -> UserId -> [UserId] -> String -> IO MessageId
+createMessage connection sender recipients content = withTransaction connection $ do
+   testAffected ("Cannot createMessage" ++ content) (1 :: Int) $ execute connection "INSERT INTO messages (sender, content) VALUES (?, ?)" (sender, content)
+   i <- query_ connection "SELECT currval(pg_get_serial_sequence('messages', 'id'))" >>= return . head
+   testAffected ("message recipients") (length recipients) $ executeMany connection "INSERT INTO recipients VALUES (?, ?)" $ fmap (i,) recipients
+   return i
 
 {-
 Some suboptimal choices, here.
@@ -157,7 +169,10 @@ showAllUsers connection = do
 printList :: (Show a) => String -> [a] -> IO ()
 printList header list = do
    putStrLn $ concat ["-- ", header, " [", show $ length list, "]"]
-   sequence_ $ fmap (putStrLn . show) $ zip [(1 :: Int) ..] list
+   sequence_ $ fmap printItem $ zip [(1 :: Int) ..] list
+   where
+   printItem :: (Show a) => (Int, a) -> IO ()
+   printItem (n, i) = putStrLn $ concat ["  ", show n, ". ", show i]
 
 main :: IO ()
 main = do
@@ -171,11 +186,13 @@ main = do
       ted <- createUser connection "ted"
       alice <- createUser connection "alice"
       showAllUsers connection
+      getUserById connection bob >>= putStrLn . show
+      getUserByName connection "bob" >>= putStrLn . show
       createMessage connection bob [carol, ted] "bob -> [carol, ted]"
       createMessage connection bob [carol] "bob -> [carol]"
       createMessage connection bob [alice] "bob -> [alice]"
       createMessage connection alice [bob] "alice -> [bob]"
-      createMessage connection ted [carol] "ted -> [carol, alice]"
+      createMessage connection ted [carol, alice] "ted -> [carol, alice]"
       ms <- getSentMessages connection bob
       printList "sent by bob" ms
       ms <- getReceivedMessages connection carol
