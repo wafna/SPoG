@@ -13,6 +13,16 @@ This project also presents a small usage scenario for Vagrant.
 
 More info on [postgres-simple](http://hackage.haskell.org/package/postgresql-simple-0.4.2.1/docs/Database-PostgreSQL-Simple.html)
 
+Building
+-----------
+
+$ vagrant up
+$ vagrant ssh
+# in the vagrant box
+$ cd /vagrant
+$ cabal build
+$ ./dist/build/spog/spog
+
 VM
 ------
 A Vagrantfile is provided for convenient access to linux (Ubuntu 14, x64) for windows users (or anyone else who can't get the haskell-pg bindings to work natively).  [Vagrant](https://docs.vagrantup.com/v2/installation/index.html) is awesome.

@@ -155,7 +155,7 @@ wipeOut connection = withTransaction connection $ do
 
 -- Brackets a connection.
 withConnection :: ConnectInfo -> (Connection -> IO a) -> IO a
-withConnection connectInfo f = bracket (connect connectInfo) close f
+withConnection connectInfo = bracket (connect connectInfo) close
 
 showAllUsers :: Connection -> IO ()
 showAllUsers connection = do
