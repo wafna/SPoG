@@ -16,12 +16,12 @@ More info on [postgres-simple](http://hackage.haskell.org/package/postgresql-sim
 Building
 -----------
 
-$ vagrant up
-$ vagrant ssh
-# in the vagrant box
-$ cd /vagrant
-$ cabal build
-$ ./dist/build/spog/spog
+    $ vagrant up
+    $ vagrant ssh
+    # in the vagrant box
+    $ cd /vagrant
+    $ cabal build
+    $ ./dist/build/spog/spog
 
 VM
 ------
